@@ -216,8 +216,9 @@ def init_attn_backend(
 
     # Add KV-sharing layers to their target's kv cache group so they are
     # discovered alongside the target layer in Phase 1 below.
+    shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
     add_kv_sharing_layers_to_kv_cache_groups(
-        get_shared_kv_cache_layers(vllm_config), kv_cache_config.kv_cache_groups
+        shared_kv_cache_layers, kv_cache_config.kv_cache_groups
     )
     fast_prefill_eligible_layers = get_kv_sharing_fast_prefill_eligible_layers(
         vllm_config, draft_layer_names
@@ -255,7 +256,25 @@ def init_attn_backend(
 
             layer_kv_cache_spec: KVCacheSpec = kv_cache_group_spec.kv_cache_spec
             if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+                layer_specs = layer_kv_cache_spec.kv_cache_specs
+                if layer_name not in layer_specs:
+                    # KV-shared layer added by name through
+                    # add_kv_sharing_layers_to_kv_cache_groups (gemma4 MTP
+                    # cross-model KV sharing): it allocates no cache of its
+                    # own, so the spec map has no entry. Reuse its target
+                    # layer's spec for group discovery; the physical cache
+                    # binds to the target's at init.
+                    target_name = shared_kv_cache_layers.get(layer_name)
+                    target_spec = (
+                        layer_specs.get(target_name)
+                        if target_name is not None
+                        else None
+                    )
+                    if target_spec is None:
+                        raise KeyError(layer_name)
+                    layer_kv_cache_spec = target_spec
+                else:
+                    layer_kv_cache_spec = layer_specs[layer_name]
 
             # Split on per-rank num_heads_q so layers with different Q-head
             # counts (e.g. a spec-decode draft head and its target) get separate
